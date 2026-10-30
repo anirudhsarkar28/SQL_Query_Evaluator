@@ -1,6 +1,8 @@
-"""Local LM Studio client. No cloud LLM API is used."""
+"""OpenAI-compatible client for the local LM Studio server."""
 import os
 import time
+from typing import Any
+
 import requests
 
 BASE_URL = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
@@ -20,9 +22,24 @@ Do not propose DROP, ALTER, TRUNCATE, INSERT, UPDATE, or DELETE statements as a 
 Do not wrap the JSON in Markdown fences. If the request is ambiguous, say so in assumptions.
 """
 
-def generate_fix(broken_sql: str, schema: str, dialect: str = "SQLite",
-                 timeout: int = 120) -> dict:
+class ModelResponseError(ValueError):
+    """Raised when the model server returns an unusable completion."""
+
+
+def generate_fix(
+    broken_sql: str,
+    schema: str,
+    dialect: str = "SQLite",
+    timeout: int = 120,
+) -> dict[str, Any]:
     """Call the local OpenAI-compatible LM Studio endpoint and return response + latency."""
+    if not broken_sql.strip():
+        raise ValueError("Enter a SQL query before requesting a repair.")
+    if not schema.strip():
+        raise ValueError("Provide the database schema before requesting a repair.")
+    if timeout <= 0:
+        raise ValueError("timeout must be greater than zero.")
+
     url = BASE_URL.rstrip("/") + "/chat/completions"
     prompt = f"""SQL dialect: {dialect}
 Database schema:
@@ -49,7 +66,14 @@ Explain the error and propose a safe corrected SELECT query."""
     )
     response.raise_for_status()
     elapsed = time.perf_counter() - started
-    payload = response.json()
-    content = payload["choices"][0]["message"]["content"]
+    try:
+        payload = response.json()
+        content = payload["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise ModelResponseError(
+            "The model server returned an invalid chat completion response."
+        ) from exc
+    if not isinstance(content, str) or not content.strip():
+        raise ModelResponseError("The model server returned an empty completion.")
     return {"raw_response": content, "latency_seconds": round(elapsed, 4),
             "model": payload.get("model", MODEL_NAME)}

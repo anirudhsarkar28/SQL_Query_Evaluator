@@ -5,25 +5,46 @@ import re
 import statistics
 from pathlib import Path
 
-from benchmark import DB_PATH, SCHEMA_TEXT, create_database, save_cases
+from benchmark import SCHEMA_TEXT, create_database, save_cases
 from model_client import generate_fix
 from sql_validator import execute_readonly, validate_select
 
-RESULTS_DIR = Path("results")
-RESULTS_DIR.mkdir(exist_ok=True)
+PROJECT_DIR = Path(__file__).resolve().parent
+RESULTS_DIR = PROJECT_DIR / "results"
 
 def parse_model_json(raw: str) -> dict:
-    """Parse JSON; tolerate a surrounding Markdown code fence."""
+    """Parse the model's JSON object and normalize its public response fields."""
+    if not isinstance(raw, str) or not raw.strip():
+        return {
+            "error_type": "unknown",
+            "explanation": "",
+            "fixed_sql": "",
+            "assumptions": "",
+            "_parse_error": True,
+        }
     cleaned = raw.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
         data = json.loads(cleaned)
         if isinstance(data, dict):
-            return data
+            expected_fields = ("error_type", "explanation", "fixed_sql", "assumptions")
+            if any(not isinstance(data.get(field, ""), str) for field in expected_fields):
+                return {
+                    "error_type": "unknown",
+                    "explanation": "The model returned invalid field types.",
+                    "fixed_sql": "",
+                    "assumptions": "",
+                    "_parse_error": True,
+                }
+            return {
+                **data,
+                **{field: data.get(field, "") for field in expected_fields},
+                "_parse_error": False,
+            }
     except json.JSONDecodeError:
         pass
-    # Fallback: retain the text for audit and avoid pretending parsing succeeded.
+    # Keep malformed output for audit without treating it as executable SQL.
     return {"error_type": "unknown", "explanation": cleaned, "fixed_sql": "", "assumptions": "",
             "_parse_error": True}
 
@@ -35,9 +56,15 @@ def normalize_rows(rows):
     return sorted((tuple(row) for row in rows), key=lambda x: repr(x))
 
 def run_benchmark():
-    db_path = create_database(DB_PATH)
-    save_cases("test_cases.json")
-    cases = json.loads(Path("test_cases.json").read_text(encoding="utf-8"))
+    RESULTS_DIR.mkdir(exist_ok=True)
+    db_path = str(RESULTS_DIR / "benchmark.db")
+    create_database(db_path)
+    cases_path = PROJECT_DIR / "test_cases.json"
+    if not cases_path.exists():
+        save_cases(cases_path)
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    if not isinstance(cases, list) or not cases:
+        raise ValueError(f"Benchmark cases must be a non-empty JSON list: {cases_path}")
     detailed = []
 
     print(f"Testing {len(cases)} cases against local model...")
@@ -145,7 +172,7 @@ def run_benchmark():
     print("\n=== SUMMARY METRICS ===")
     for name, value in metrics.items():
         print(f"{name}: {value}")
-    print(f"\nSaved: {detail_path}, {summary_path}, results/category_metrics.csv")
+    print(f"\nSaved: {detail_path}, {summary_path}, {RESULTS_DIR / 'category_metrics.csv'}")
 
 def pct(numerator, denominator):
     return round(100 * numerator / denominator, 2) if denominator else 0.0
